@@ -22,6 +22,7 @@ class SettingsDialog(QDialog):
         self.update_classes=current_classes.copy()
         self.export_dir=current_export_dir
         
+        
         layout=QVBoxLayout()
         tabs=QTabWidget()
         
@@ -92,6 +93,7 @@ class Annotator(QMainWindow):
         self.setWindowTitle("FAP: Fully Automated Production Annotator")
         self.setGeometry(100, 100, 1000, 700)
         self.showMaximized()
+        self.unsaved_changes=False
 
         self.class_names=["Autobiography","HSE"]
         self.image = None
@@ -119,7 +121,6 @@ class Annotator(QMainWindow):
         self.update_active_class_label()
         
         
-        
         # Buttons
         load_folder_button = QPushButton("Load Folder")
         save_button = QPushButton("Save Annotation")
@@ -128,6 +129,8 @@ class Annotator(QMainWindow):
         reset_button = QPushButton("Reset Annotation(s)")
         settings_button = QPushButton("Settings⚙️")
         export_button = QPushButton("📦 Export to ZIP")
+        mark_empty_button=QPushButton("Mark as Empty")
+        
         
 
         load_folder_button.clicked.connect(self.load_folder)
@@ -137,11 +140,13 @@ class Annotator(QMainWindow):
         reset_button.clicked.connect(self.reset_annotations)
         settings_button.clicked.connect(self.open_settings)
         export_button.clicked.connect(self.export_to_zip)
+        mark_empty_button.clicked.connect(self.mark_image_as_empty)
         
 
         button_layout = QHBoxLayout()
         button_layout.addWidget(load_folder_button)
         button_layout.addWidget(save_button)
+        button_layout.addWidget(mark_empty_button)
         button_layout.addWidget(clear_button)
         button_layout.addWidget(self.active_class_label)
         button_layout.addWidget(self.class_dropdown)
@@ -334,6 +339,7 @@ class Annotator(QMainWindow):
 
         #self.points.append((int(x), int(y)))
         self.display_image()
+        self.unsaved_changes = True
 
 
     def load_image_by_name(self, filename):
@@ -375,13 +381,13 @@ class Annotator(QMainWindow):
                     #self.points = [(coords[i], coords[i + 1]) for i in range(0, 8, 2)]
         self.display_image()
 
-    def save_annotation(self):
-        if not self.annotations:
-            self.show_status("❌ No annotations to save.")
-            return        
-        
+    def save_annotation(self):    
         if not self.export_dir:
             self.show_status("❌ Export directory not set. Please configure in settings.")
+            return
+
+        if not self.image_path:
+            self.show_status("❌ No image loaded")
             return
         
         images_dir=os.path.join(self.export_dir,"images")
@@ -390,12 +396,12 @@ class Annotator(QMainWindow):
         os.makedirs(labels_dir, exist_ok=True)
         
         image_filename=os.path.basename(self.image_path)
-        image_save_path=os.path.join(images_dir,image_filename)
-        resized_img_bgr=cv2.cvtColor(self.image, cv2.COLOR_RGB2BGR)  # Convert back to BGR for OpenCV saving
-        cv2.imwrite(image_save_path, resized_img_bgr)
-        
+        image_save_path=os.path.join(images_dir,image_filename)    
         label_filename=os.path.splitext(image_filename)[0]+".txt"
         label_save_path=os.path.join(labels_dir,label_filename)
+        
+        resized_img_bgr=cv2.cvtColor(self.image, cv2.COLOR_RGB2BGR)  # Convert back to BGR for OpenCV saving
+        cv2.imwrite(image_save_path, resized_img_bgr)
         
         with open(label_save_path,"w")as f:
             for ann in self.annotations:
@@ -408,8 +414,13 @@ class Annotator(QMainWindow):
                 coords=" ".join([f"{x} {y}" for x, y in ann["points"]])
                 f.write(f"{class_index} {coords}\n")
         
-        self.show_status(f"✅ Saved {len(self.annotations)} annotation(s) to {label_save_path}", success=True)
+        self.unsaved_changes=False
+        
+        if self.annotations:
+            self.show_status(f"✅ Saved {len(self.annotations)} annotation(s) to {label_save_path}", success=True)
 
+        else:
+            self.show_status(f"🟡 No annotations found. Saved empty label file to {label_save_path}", success=True)
         # Save annotation
         #label_path = os.path.splitext(self.image_path)[0] + ".txt"
         
@@ -448,15 +459,22 @@ class Annotator(QMainWindow):
             self.show_status("Nothing to clear.")
         #self.points = []
         self.display_image()
+        self.unsaved_changes = True
 
     def image_selected(self, item):
+        if self.unsaved_changes:
+            reply = QMessageBox.question(self,'Unsaved Annotations','You have unsaved annotations. Do you want to continue without saving?',QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.No:
+                return
         image_name = item.text()
         self.load_image_by_name(image_name)
+        self.unsaved_changes=False
         
     def reset_annotations(self):
         self.annotations=[]
         self.current_points=[]
         self.display_image()
+        self.unsaved_changes = True
         self.show_status("🧹 Cleared all annotations for this image.")
         
     def update_active_class_label(self):
@@ -518,6 +536,26 @@ class Annotator(QMainWindow):
         
         except Exception as e:
             self.show_status(f"❌ Export failed: {str(e)}", success=False)
+
+    def mark_image_as_empty(self):
+        if not self.image_path:
+            self.show_status("❌ No image loaded.", success=False)
+            return
+        
+        self.annotations=[]
+        self.current_points=[]
+        
+        label_path=os.path.splitext(self.image_path)[0]+".txt"
+        with open(label_path,"w") as f:
+            pass
+        
+        if self.export_dir:
+            os.makedirs(os.path.join(self.export_dir,"labels"),exist_ok=True)
+            export_label_path=os.path.join(self.export_dir,"labels",os.path.basename(label_path))
+            with open(export_label_path, "w")as f:
+                pass
+            
+        self.show_status("🟡 Marked image as empty and saved label file.", success=True)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
