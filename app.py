@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QMenu, 
 )
 import random
-from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen
+from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen, QIcon
 from PyQt5.QtCore import Qt, QPointF, pyqtSignal
 import cv2
 import numpy as np
@@ -107,8 +107,8 @@ class Annotator(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("FAP: Fully Automated Production Annotator")
+        self.setWindowIcon(QIcon("logo.png"))  # Ensure you have a logo.png in the same directory
         self.setGeometry(100, 100, 1000, 700)
-        self.showMaximized()
         self.unsaved_changes=False
 
         self.class_names=["Autobiography","HSE"]
@@ -123,7 +123,6 @@ class Annotator(QMainWindow):
         self.current_points=[]
         self.export_dir=""
         self.dark_mode_enabled=False
-        self.annotation_counter_label=QLabel("📊 Annotation Counts:")
 
         self.init_ui()
 
@@ -150,6 +149,7 @@ class Annotator(QMainWindow):
         settings_button = QPushButton("Settings⚙️")
         export_button = QPushButton("📦 Export to ZIP")
         mark_empty_button=QPushButton("Mark as Empty")
+        annotation_counter_button = QPushButton("📊 View Counts")
         
         load_menu=QMenu()
         
@@ -172,6 +172,7 @@ class Annotator(QMainWindow):
         settings_button.clicked.connect(self.open_settings)
         export_button.clicked.connect(self.export_to_zip)
         mark_empty_button.clicked.connect(self.mark_image_as_empty)
+        annotation_counter_button.clicked.connect(self.show_annotation_counter)
         
 
         button_layout = QHBoxLayout()
@@ -202,12 +203,22 @@ class Annotator(QMainWindow):
         
 
         
+        # Navigation buttons
+        nav_layout = QHBoxLayout()
+        prev_button = QPushButton("◀ Previous Image")
+        next_button = QPushButton("Next Image ▶")
+        prev_button.clicked.connect(self.previous_image)
+        next_button.clicked.connect(self.next_image)
+        nav_layout.addWidget(prev_button)
+        nav_layout.addWidget(next_button)
+        
         #left side thingers
         left_layout.addLayout(button_layout)
         left_layout.addWidget(self.image_label)
-        left_layout.addWidget(self.status_label) 
+        left_layout.addWidget(self.status_label)
+        left_layout.addLayout(nav_layout)
         left_layout.addWidget(export_button)   
-        left_layout.addWidget(self.annotation_counter_label)
+        left_layout.addWidget(annotation_counter_button)
         
         #right side thinger
         self.image_list_widget=QListWidget()
@@ -230,35 +241,90 @@ class Annotator(QMainWindow):
         
         
     def preview_annotation(self):
-        if len(self.points) != 4:
-            self.status_label.setText("❌ Please select exactly 4 points to preview.")
-            #print("❌ Please select exactly 4 points to preview.")
+        if self.image is None:
+            self.show_status("❌ No image loaded to preview.", success=False)
             return
 
-        if self.image is None:
-            self.status_label.setText("❌ No image loaded to preview.")
-            #print("❌ No image loaded.")
+        if not self.export_dir:
+            self.show_status("❌ Export directory not set. Please configure in settings.", success=False)
             return
+
+        if not self.image_path:
+            self.show_status("❌ No image path available.", success=False)
+            return
+
+        # Get the label file path
+        image_filename = os.path.basename(self.image_path)
+        label_filename = os.path.splitext(image_filename)[0] + ".txt"
+        label_path = os.path.join(self.export_dir, "labels", label_filename)
 
         img_copy = self.image.copy()
+        annotations_found = False
 
-        # Draw polygon
-        pts = np.array(self.points, np.int32).reshape((-1, 1, 2))
-        cv2.polylines(img_copy, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
+        # Check if label file exists and load annotations
+        if os.path.exists(label_path):
+            try:
+                with open(label_path, "r") as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) == 9:  # Valid annotation line
+                            try:
+                                class_id = int(parts[0])
+                                if 0 <= class_id < len(self.class_names):
+                                    class_name = self.class_names[class_id]
+                                    coords = list(map(int, parts[1:]))
+                                    points = [(coords[i], coords[i + 1]) for i in range(0, 8, 2)]
+                                    
+                                    # Get class color
+                                    color = self.class_colors.get(class_name, (0, 255, 0))
+                                    
+                                    # Draw polygon
+                                    pts = np.array(points, np.int32).reshape((-1, 1, 2))
+                                    cv2.polylines(img_copy, [pts], isClosed=True, color=color, thickness=3)
+                                    
+                                    # Draw point numbers
+                                    for idx, (x, y) in enumerate(points):
+                                        cv2.circle(img_copy, (x, y), 6, (0, 0, 255), -1)
+                                        cv2.putText(img_copy, str(idx + 1), (x + 8, y - 8),
+                                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                                    
+                                    # Draw class label
+                                    label_text = f"{class_name} ({class_id})"
+                                    x_text, y_text = points[0]
+                                    cv2.putText(img_copy, label_text, (x_text + 10, y_text - 10),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+                                    
+                                    annotations_found = True
+                                else:
+                                    self.show_status(f"❌ Invalid class ID {class_id} in label file.", success=False)
+                            except ValueError:
+                                self.show_status("❌ Error parsing label file format.", success=False)
+                                continue
+                
+                if not annotations_found:
+                    # Empty label file
+                    cv2.putText(img_copy, "Image is not labelled yet", (50, 50),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                    self.show_status("🟡 Image has empty label file - not labelled yet.", success=True)
+                else:
+                    self.show_status("✅ Displaying saved annotations from label file.", success=True)
+                    
+            except Exception as e:
+                cv2.putText(img_copy, "Error reading label file", (50, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                self.show_status(f"❌ Error reading label file: {str(e)}", success=False)
+        else:
+            # No label file exists
+            QMessageBox.information(self,"Mismatch","⚠️ No label found for the image (The image is probably not labelled yet).")
+            self.show_status("🟡 No label file found - image not labelled yet.", success=True)
 
-        # Draw point numbers
-        for idx, (x, y) in enumerate(self.points):
-            cv2.circle(img_copy, (x, y), 5, (0, 0, 255), -1)
-            cv2.putText(img_copy, str(idx + 1), (x + 5, y - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-
+        # Display the preview
         height, width, channel = img_copy.shape
         bytes_per_line = channel * width
         q_img = QImage(img_copy.data, width, height, bytes_per_line, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(q_img)
 
         self.image_label.setPixmap(pixmap)
-        self.image_label.setFixedSize(pixmap.size())
 
     def load_image(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.jpg *.jpeg)")
@@ -420,7 +486,6 @@ class Annotator(QMainWindow):
                     #coords = list(map(int, line[1:]))
                     #self.points = [(coords[i], coords[i + 1]) for i in range(0, 8, 2)]
         self.display_image()
-        self.update_annotation_counter()
 
     def save_annotation(self):    
         if not self.export_dir:
@@ -430,7 +495,7 @@ class Annotator(QMainWindow):
         if not self.image_path:
             self.show_status("❌ No image loaded")
             return
-        
+
         images_dir=os.path.join(self.export_dir,"images")
         labels_dir=os.path.join(self.export_dir,"labels")
         os.makedirs(images_dir, exist_ok=True)
@@ -456,7 +521,6 @@ class Annotator(QMainWindow):
                 f.write(f"{class_index} {coords}\n")
         
         self.unsaved_changes=False
-        self.update_annotation_counter()
         
         if self.annotations:
             self.show_status(f"✅ Saved {len(self.annotations)} annotation(s) to {label_save_path}", success=True)
@@ -501,7 +565,6 @@ class Annotator(QMainWindow):
             self.show_status("Nothing to clear.")
         #self.points = []
         self.display_image()
-        self.update_annotation_counter()
         self.unsaved_changes = True
 
     def image_selected(self, item):
@@ -517,7 +580,6 @@ class Annotator(QMainWindow):
         self.annotations=[]
         self.current_points=[]
         self.display_image()
-        self.update_annotation_counter()
         self.unsaved_changes = True
         self.show_status("🧹 Cleared all annotations for this image.")
         
@@ -600,7 +662,6 @@ class Annotator(QMainWindow):
             export_label_path=os.path.join(self.export_dir,"labels",os.path.basename(label_path))
             with open(export_label_path, "w")as f:
                 pass
-        self.update_annotation_counter() 
         self.display_image() 
         self.show_status("🟡 Marked image as empty and saved label file.", success=True)
 
@@ -686,10 +747,13 @@ class Annotator(QMainWindow):
     def load_existing_project(self):
         QMessageBox.information(self,"Reminder","⚠️ Please ensure your class names are configured in Settings before loading.")
         
+        QMessageBox.information(self,"Image Folder","Please select image folder where all your images are currently stored, regardless of whether they are labelled or not")
         image_folder=QFileDialog.getExistingDirectory(self,"Select Image Folder")
+        
         if not image_folder:
             return
         
+        QMessageBox.information(self,"Label Folder","Please select label folder where all your labels are stored, for images that are already labelled")
         label_folder=QFileDialog.getExistingDirectory(self,"Select Label Folder (txt files please)")
         if not label_folder:
             return
@@ -766,7 +830,12 @@ class Annotator(QMainWindow):
         
         current_index = self.image_list_widget.currentRow()
         if current_index+1<self.image_list_widget.count():
-            self.image_list_widget.setCurrentRow(current_index + 1)
+            next_index = current_index + 1
+            self.image_list_widget.setCurrentRow(next_index)
+            # Directly load the image since setCurrentRow doesn't trigger itemClicked
+            image_name = self.image_list[next_index]
+            self.load_image_by_name(image_name)
+            self.unsaved_changes = False
             
     def previous_image(self):
         if self.unsaved_changes:
@@ -776,27 +845,67 @@ class Annotator(QMainWindow):
         
         current_index = self.image_list_widget.currentRow()
         if current_index > 0:
-            self.image_list_widget.setCurrentRow(current_index - 1)
+            prev_index = current_index - 1
+            self.image_list_widget.setCurrentRow(prev_index)
+            # Directly load the image since setCurrentRow doesn't trigger itemClicked
+            image_name = self.image_list[prev_index]
+            self.load_image_by_name(image_name)
+            self.unsaved_changes = False
     
-    def update_annotation_counter(self):
-        counts={class_name: 0 for class_name in self.class_names}
+    def show_annotation_counter(self):
+        counts = self.get_annotation_counts()
         
-        for ann in self.annotations:
-            class_name=ann['class']
-            if class_name in counts:
-                counts[class_name]+=1
-        
-        text="📊 Annotation Counts:\n"
+        text = "📊 Annotation Counts (Total):\n\n"
         for cls, count in counts.items():
-            text+=f"{cls}:{count}\n"
+            text += f"{cls}: {count}\n"
         
-        self.annotation_counter_label.setText(text.strip())
+        if all(count == 0 for count in counts.values()):
+            text += "\nNo annotations found."
+        
+        QMessageBox.information(self, "Annotation Counter", text.strip())
+    
+    def get_annotation_counts(self):
+        counts = {class_name: 0 for class_name in self.class_names}
+        
+        # Count annotations across all images if we have a project loaded
+        if self.image_list and (self.export_dir or self.label_dir):
+            for image_name in self.image_list:
+                label_filename = os.path.splitext(image_name)[0] + ".txt"
+                
+                # Try export directory first, then label directory, then same as image
+                if self.export_dir:
+                    label_path = os.path.join(self.export_dir, "labels", label_filename)
+                elif self.label_dir:
+                    label_path = os.path.join(self.label_dir, label_filename)
+                else:
+                    label_path = os.path.join(self.image_dir, label_filename)
+                
+                if os.path.exists(label_path):
+                    try:
+                        with open(label_path, "r") as f:
+                            for line in f:
+                                parts = line.strip().split()
+                                if len(parts) >= 9:  # Valid annotation line
+                                    class_id = int(parts[0])
+                                    if 0 <= class_id < len(self.class_names):
+                                        class_name = self.class_names[class_id]
+                                        counts[class_name] += 1
+                    except (ValueError, IndexError):
+                        continue  # Skip malformed lines
+        else:
+            # Fallback to current image only if no project is loaded
+            for ann in self.annotations:
+                class_name = ann['class']
+                if class_name in counts:
+                    counts[class_name] += 1
+        
+        return counts
 
     
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = Annotator()
-    window.show()
+    window.showMaximized()  # Maximize the window after creation
     sys.exit(app.exec_())
 
 
