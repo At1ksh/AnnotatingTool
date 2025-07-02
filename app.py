@@ -125,6 +125,8 @@ class Annotator(QMainWindow):
         self.dark_mode_enabled=False
         self.import_as_bw=False  # Store user preference for black and white import
         self.rotation_angle=0  # Track current rotation (0, 90, 180, 270)
+        self.zoom_factor=1.0  # Track zoom level
+        self.original_image=None  # Store original unscaled image
 
         self.init_ui()
 
@@ -190,11 +192,15 @@ class Annotator(QMainWindow):
         button_layout.addWidget(settings_button)
 
 
-        # Image display
+        # Image display with scroll area for large images
+        self.scroll_area = QScrollArea()
         self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignTop | Qt.AlignHCenter)  # Top-center alignment
-        self.image_label.setScaledContents(False)  # Do NOT auto-rescale
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setScaledContents(False)
         self.image_label.mousePressEvent = self.get_mouse_position
+        self.image_label.wheelEvent = self.wheel_zoom
+        self.scroll_area.setWidget(self.image_label)
+        self.scroll_area.setWidgetResizable(True)
 
         #main_layout.addLayout(button_layout)
         #main_layout.addWidget(self.image_label)
@@ -205,21 +211,32 @@ class Annotator(QMainWindow):
         
 
         
-        # Navigation buttons
+        # Navigation and zoom buttons
         nav_layout = QHBoxLayout()
         prev_button = QPushButton("◀ Previous Image")
         next_button = QPushButton("Next Image ▶")
         rotate_button = QPushButton("🔄 Rotate Image")
+        zoom_in_button = QPushButton("🔍+ Zoom In")
+        zoom_out_button = QPushButton("🔍- Zoom Out")
+        zoom_reset_button = QPushButton("🔍 Reset Zoom")
+        
         prev_button.clicked.connect(self.previous_image)
         next_button.clicked.connect(self.next_image)
         rotate_button.clicked.connect(self.rotate_image)
+        zoom_in_button.clicked.connect(self.zoom_in)
+        zoom_out_button.clicked.connect(self.zoom_out)
+        zoom_reset_button.clicked.connect(self.zoom_reset)
+        
         nav_layout.addWidget(prev_button)
         nav_layout.addWidget(rotate_button)
+        nav_layout.addWidget(zoom_out_button)
+        nav_layout.addWidget(zoom_reset_button)
+        nav_layout.addWidget(zoom_in_button)
         nav_layout.addWidget(next_button)
         
         #left side thingers
         left_layout.addLayout(button_layout)
-        left_layout.addWidget(self.image_label)
+        left_layout.addWidget(self.scroll_area)  # Use scroll area instead of direct image label
         left_layout.addWidget(self.status_label)
         left_layout.addLayout(nav_layout)
         left_layout.addWidget(export_button)   
@@ -337,9 +354,11 @@ class Annotator(QMainWindow):
             self.image_path = file_path
             img = cv2.imread(file_path)
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            # Resize to 1280x720
-            img = cv2.resize(img, (1280, 720), interpolation=cv2.INTER_AREA)
+            # Keep original dimensions - no resizing
+            self.original_image = img.copy()
             self.image = img
+            self.zoom_factor = 1.0
+            self.rotation_angle = 0
             self.display_image()
             self.points = []
 
@@ -347,6 +366,7 @@ class Annotator(QMainWindow):
         if self.image is not None:
             img_copy = self.image.copy()
             
+            # Draw existing annotations on original image
             for ann in self.annotations:
                 pts=np.array(ann["points"],np.int32).reshape((-1,1,2))
                 class_name=ann["class"]
@@ -364,23 +384,24 @@ class Annotator(QMainWindow):
                     img_copy, label, (x_text+5,y_text-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color,2, cv2.LINE_AA
                 )
             
-            #for idx, ann in enumerate(self.annotations):
-            #    pts=np.array(ann["points"], np.int32).reshape((-1, 1, 2))
-            #    cv2.polylines(img_copy, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
-            #    for i,(x,y) in enumerate(ann["points"]):
-            #        cv2.circle(img_copy, (x, y), 5, (255,0,0), -1)
-            
+            # Draw current points being created
             for(x,y) in self.current_points:
                 cv2.circle(img_copy, (x, y), 5, (255,0,0), -1)
                 
+            # Apply zoom to display - scale everything together
+            if self.zoom_factor != 1.0:
+                h, w = img_copy.shape[:2]
+                new_h, new_w = int(h * self.zoom_factor), int(w * self.zoom_factor)
+                img_copy = cv2.resize(img_copy, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
             height, width, channel = img_copy.shape
             bytes_per_line = channel * width
             q_img = QImage(img_copy.data, width, height, bytes_per_line, QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(q_img)
             self.image_label.setPixmap(pixmap)
-    
-            #self.image_label.setFixedSize(pixmap.size())  # Force QLabel to match image size
+            
+            # Update scroll area to accommodate new size
+            self.image_label.adjustSize()
 
 
     def load_folder(self):
@@ -412,26 +433,42 @@ class Annotator(QMainWindow):
         if pixmap is None:
             return
         
-        pixmap_width=pixmap.width()
-        pixmap_height=pixmap.height()
-        label_width=self.image_label.width()
-        label_height=self.image_label.height()
+        # Get click position relative to the image label
+        click_x = event.pos().x()
+        click_y = event.pos().y()
         
-        x_offset= max((label_width - pixmap_width) // 2, 0)
-        y_offset= max((label_height - pixmap_height) // 2, 0)   
-
-        x = event.pos().x() - x_offset
-        y = event.pos().y() - y_offset
+        # Get original image dimensions (before zoom)
+        img_height, img_width = self.image.shape[:2]
         
-        # Ensure click is within image bounds
-        if x < 0 or y < 0 or x >= pixmap_width or y >= pixmap_height:
+        # Get displayed pixmap dimensions (after zoom)
+        pixmap_width = pixmap.width()
+        pixmap_height = pixmap.height()
+        
+        # Get the image label dimensions
+        label_width = self.image_label.width()
+        label_height = self.image_label.height()
+        
+        # Calculate offset if image is centered in label
+        x_offset = max((label_width - pixmap_width) // 2, 0)
+        y_offset = max((label_height - pixmap_height) // 2, 0)
+        
+        # Adjust click coordinates to account for centering
+        adjusted_x = click_x - x_offset
+        adjusted_y = click_y - y_offset
+        
+        # Check if click is within the displayed image bounds
+        if adjusted_x < 0 or adjusted_y < 0 or adjusted_x >= pixmap_width or adjusted_y >= pixmap_height:
             return
         
-        img_height, img_width, _ = self.image.shape
-        img_x=int(x * img_width / pixmap_width)
-        img_y=int(y * img_height / pixmap_height)
+        # Convert from zoomed display coordinates to original image coordinates
+        actual_x = int(adjusted_x / self.zoom_factor)
+        actual_y = int(adjusted_y / self.zoom_factor)
         
-        self.current_points.append((img_x, img_y))
+        # Ensure coordinates are within original image bounds
+        if actual_x < 0 or actual_y < 0 or actual_x >= img_width or actual_y >= img_height:
+            return
+        
+        self.current_points.append((actual_x, actual_y))
         
         if(len(self.current_points) == 4):
             class_index = self.class_dropdown.currentIndex()
@@ -443,7 +480,6 @@ class Annotator(QMainWindow):
             self.current_points = []
             self.show_status(f"✅ Annotation added for class {class_name} #{len(self.annotations)}", success=True)
 
-        #self.points.append((int(x), int(y)))
         self.display_image()
         self.unsaved_changes = True
 
@@ -462,8 +498,10 @@ class Annotator(QMainWindow):
             gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
             img = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)  # Convert back to 3-channel
         
-        img = cv2.resize(img, (1280, 720), interpolation=cv2.INTER_AREA)
+        # Keep original dimensions - no resizing to 1280x720
+        self.original_image = img.copy()
         self.image = img
+        self.zoom_factor = 1.0  # Reset zoom
         self.rotation_angle = 0  # Reset rotation when loading new image
         #self.display_image()
 
@@ -518,11 +556,20 @@ class Annotator(QMainWindow):
         label_filename=os.path.splitext(image_filename)[0]+".txt"
         label_save_path=os.path.join(labels_dir,label_filename)
         
-        resized_img_bgr=cv2.cvtColor(self.image, cv2.COLOR_RGB2BGR)  # Convert back to BGR for OpenCV saving
-        cv2.imwrite(image_save_path, resized_img_bgr)
+        # Save the ORIGINAL image (not the potentially rotated/modified one)
+        if self.original_image is not None:
+            original_img_bgr = cv2.cvtColor(self.original_image, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(image_save_path, original_img_bgr)
+        else:
+            # Fallback to current image if original is not available
+            resized_img_bgr=cv2.cvtColor(self.image, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(image_save_path, resized_img_bgr)
+        
+        # Transform annotations back to original image coordinates if needed
+        annotations_to_save = self.get_original_coordinates_annotations()
         
         with open(label_save_path,"w")as f:
-            for ann in self.annotations:
+            for ann in annotations_to_save:
                 class_name=ann["class"]
                 try:
                     class_index=self.class_names.index(class_name)
@@ -835,6 +882,12 @@ class Annotator(QMainWindow):
             self.reset_annotations()
         elif key==Qt.Key_T:
             self.rotate_image()
+        elif key==Qt.Key_Plus or key==Qt.Key_Equal:
+            self.zoom_in()
+        elif key==Qt.Key_Minus:
+            self.zoom_out()
+        elif key==Qt.Key_0:
+            self.zoom_reset()
         elif key==Qt.Key_Escape:
             self.current_points.clear()
             self.display_image()
@@ -860,6 +913,10 @@ class Annotator(QMainWindow):
         • C → Clear current polygon points
         • R → Reset all annotations for current image
         • T → Rotate image by 90°
+        • + or = → Zoom in
+        • - → Zoom out  
+        • 0 → Reset zoom to 1.0x
+        • Mouse Wheel → Zoom in/out (scroll up = zoom in, scroll down = zoom out)
         • Esc → Cancel current drawing (clears selected points)
         • Ctrl + H → Show this help popup
         • Ctrl + D → Toggle Dark Mode
@@ -917,14 +974,56 @@ class Annotator(QMainWindow):
         
         self.show_status(f"🔄 Image rotated to {self.rotation_angle}°", success=True)
     
+    def zoom_in(self):
+        if self.image is None:
+            self.show_status("❌ No image loaded to zoom.", success=False)
+            return
+        
+        self.zoom_factor = min(self.zoom_factor * 1.25, 5.0)  # Max 5x zoom
+        self.display_image()
+        self.show_status(f"🔍 Zoomed in to {self.zoom_factor:.1f}x", success=True)
+    
+    def zoom_out(self):
+        if self.image is None:
+            self.show_status("❌ No image loaded to zoom.", success=False)
+            return
+        
+        self.zoom_factor = max(self.zoom_factor / 1.25, 0.1)  # Min 0.1x zoom
+        self.display_image()
+        self.show_status(f"🔍 Zoomed out to {self.zoom_factor:.1f}x", success=True)
+    
+    def zoom_reset(self):
+        if self.image is None:
+            self.show_status("❌ No image loaded to reset zoom.", success=False)
+            return
+        
+        self.zoom_factor = 1.0
+        self.display_image()
+        self.show_status("🔍 Zoom reset to 1.0x", success=True)
+    
+    def wheel_zoom(self, event):
+        """Handle mouse wheel zoom functionality"""
+        if self.image is None:
+            return
+        
+        # Get the scroll direction
+        delta = event.angleDelta().y()
+        
+        if delta > 0:
+            # Scroll up - zoom in
+            self.zoom_factor = min(self.zoom_factor * 1.1, 5.0)  # Max 5x zoom
+            self.display_image()
+            self.show_status(f"🔍 Zoomed in to {self.zoom_factor:.1f}x", success=True)
+        elif delta < 0:
+            # Scroll down - zoom out
+            self.zoom_factor = max(self.zoom_factor / 1.1, 0.1)  # Min 0.1x zoom
+            self.display_image()
+            self.show_status(f"🔍 Zoomed out to {self.zoom_factor:.1f}x", success=True)
+
     def rotate_image_90(self, img):
-        """Rotate image by 90 degrees clockwise and resize to maintain 1280x720"""
+        """Rotate image by 90 degrees clockwise - preserve original dimensions"""
         # Rotate 90 degrees clockwise
         rotated = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-        
-        # Resize back to 1280x720
-        rotated = cv2.resize(rotated, (1280, 720), interpolation=cv2.INTER_AREA)
-        
         return rotated
     
     def transform_annotations_for_rotation(self):
@@ -932,8 +1031,8 @@ class Annotator(QMainWindow):
         if not self.annotations:
             return
         
-        # Original dimensions (before rotation)
-        orig_height, orig_width = 720, 1280
+        # Use current image dimensions (not fixed 1280x720)
+        orig_height, orig_width = self.image.shape[:2]
         
         # Transform each annotation
         for ann in self.annotations:
@@ -954,6 +1053,48 @@ class Annotator(QMainWindow):
                 new_y = orig_width - x
                 new_current_points.append((new_x, new_y))
             self.current_points = new_current_points
+
+    def get_original_coordinates_annotations(self):
+        """Transform current annotations back to original image coordinates if rotation was applied"""
+        if self.rotation_angle == 0 or not self.annotations:
+            return self.annotations
+        
+        # Get original image dimensions
+        if self.original_image is not None:
+            orig_height, orig_width = self.original_image.shape[:2]
+        else:
+            return self.annotations
+        
+        transformed_annotations = []
+        
+        for ann in self.annotations:
+            new_points = []
+            for x, y in ann["points"]:
+                # Reverse the rotation transformations based on rotation_angle
+                if self.rotation_angle == 90:
+                    # Reverse 90° clockwise: new_x = orig_height - y, new_y = x
+                    new_x = orig_height - y
+                    new_y = x
+                elif self.rotation_angle == 180:
+                    # Reverse 180°: new_x = orig_width - x, new_y = orig_height - y
+                    new_x = orig_width - x
+                    new_y = orig_height - y
+                elif self.rotation_angle == 270:
+                    # Reverse 270° clockwise: new_x = y, new_y = orig_width - x
+                    new_x = y
+                    new_y = orig_width - x
+                else:
+                    # No rotation or invalid angle
+                    new_x, new_y = x, y
+                
+                new_points.append((new_x, new_y))
+            
+            transformed_annotations.append({
+                "class": ann["class"],
+                "points": new_points
+            })
+        
+        return transformed_annotations
 
     def show_annotation_counter(self):
         counts = self.get_annotation_counts()
