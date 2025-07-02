@@ -123,6 +123,8 @@ class Annotator(QMainWindow):
         self.current_points=[]
         self.export_dir=""
         self.dark_mode_enabled=False
+        self.import_as_bw=False  # Store user preference for black and white import
+        self.rotation_angle=0  # Track current rotation (0, 90, 180, 270)
 
         self.init_ui()
 
@@ -207,9 +209,12 @@ class Annotator(QMainWindow):
         nav_layout = QHBoxLayout()
         prev_button = QPushButton("◀ Previous Image")
         next_button = QPushButton("Next Image ▶")
+        rotate_button = QPushButton("🔄 Rotate Image")
         prev_button.clicked.connect(self.previous_image)
         next_button.clicked.connect(self.next_image)
+        rotate_button.clicked.connect(self.rotate_image)
         nav_layout.addWidget(prev_button)
+        nav_layout.addWidget(rotate_button)
         nav_layout.addWidget(next_button)
         
         #left side thingers
@@ -451,8 +456,15 @@ class Annotator(QMainWindow):
 
         img = cv2.imread(file_path)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # Apply black and white conversion if user preference is set
+        if self.import_as_bw:
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            img = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)  # Convert back to 3-channel
+        
         img = cv2.resize(img, (1280, 720), interpolation=cv2.INTER_AREA)
         self.image = img
+        self.rotation_angle = 0  # Reset rotation when loading new image
         #self.display_image()
 
         # Try to load existing annotation
@@ -727,6 +739,21 @@ class Annotator(QMainWindow):
         if not folder:
             return
         
+        # Ask user once for black and white preference
+        reply = QMessageBox.question(
+            self, 
+            'Import Options', 
+            '🎨 Do you want to import ALL images as black and white?\n\n'
+            '• Yes: Convert all images to grayscale (still 3-channel RGB)\n'
+            '• No: Keep original colors for all images',
+            QMessageBox.Yes | QMessageBox.No, 
+            QMessageBox.No
+        )
+        
+        self.import_as_bw = (reply == QMessageBox.Yes)
+        if self.import_as_bw:
+            self.show_status("🎨 All images will be imported as black and white", success=True)
+        
         self.image_dir=folder
         self.label_dir=None
         self.image_list=[f for f in os.listdir(folder) if f.lower().endswith((".jpg",".jpeg",".png"))]
@@ -757,6 +784,21 @@ class Annotator(QMainWindow):
         label_folder=QFileDialog.getExistingDirectory(self,"Select Label Folder (txt files please)")
         if not label_folder:
             return
+        
+        # Ask user once for black and white preference
+        reply = QMessageBox.question(
+            self, 
+            'Import Options', 
+            '🎨 Do you want to import ALL images as black and white?\n\n'
+            '• Yes: Convert all images to grayscale (still 3-channel RGB)\n'
+            '• No: Keep original colors for all images',
+            QMessageBox.Yes | QMessageBox.No, 
+            QMessageBox.No
+        )
+        
+        self.import_as_bw = (reply == QMessageBox.Yes)
+        if self.import_as_bw:
+            self.show_status("🎨 All images will be imported as black and white", success=True)
         
         self.image_dir=image_folder
         self.label_dir=label_folder
@@ -791,6 +833,8 @@ class Annotator(QMainWindow):
             self.clear_points()
         elif key==Qt.Key_R:
             self.reset_annotations()
+        elif key==Qt.Key_T:
+            self.rotate_image()
         elif key==Qt.Key_Escape:
             self.current_points.clear()
             self.display_image()
@@ -815,6 +859,7 @@ class Annotator(QMainWindow):
         • B → Previous image
         • C → Clear current polygon points
         • R → Reset all annotations for current image
+        • T → Rotate image by 90°
         • Esc → Cancel current drawing (clears selected points)
         • Ctrl + H → Show this help popup
         • Ctrl + D → Toggle Dark Mode
@@ -852,6 +897,64 @@ class Annotator(QMainWindow):
             self.load_image_by_name(image_name)
             self.unsaved_changes = False
     
+    def rotate_image(self):
+        if self.image is None:
+            self.show_status("❌ No image loaded to rotate.", success=False)
+            return
+        
+        # Increment rotation angle by 90 degrees
+        self.rotation_angle = (self.rotation_angle + 90) % 360
+        
+        # Rotate the image
+        self.image = self.rotate_image_90(self.image)
+        
+        # Transform existing annotations
+        self.transform_annotations_for_rotation()
+        
+        # Update display
+        self.display_image()
+        self.unsaved_changes = True
+        
+        self.show_status(f"🔄 Image rotated to {self.rotation_angle}°", success=True)
+    
+    def rotate_image_90(self, img):
+        """Rotate image by 90 degrees clockwise and resize to maintain 1280x720"""
+        # Rotate 90 degrees clockwise
+        rotated = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+        
+        # Resize back to 1280x720
+        rotated = cv2.resize(rotated, (1280, 720), interpolation=cv2.INTER_AREA)
+        
+        return rotated
+    
+    def transform_annotations_for_rotation(self):
+        """Transform annotation coordinates after 90-degree clockwise rotation"""
+        if not self.annotations:
+            return
+        
+        # Original dimensions (before rotation)
+        orig_height, orig_width = 720, 1280
+        
+        # Transform each annotation
+        for ann in self.annotations:
+            new_points = []
+            for x, y in ann["points"]:
+                # 90-degree clockwise rotation transformation
+                # new_x = y, new_y = orig_width - x
+                new_x = y
+                new_y = orig_width - x
+                new_points.append((new_x, new_y))
+            ann["points"] = new_points
+        
+        # Transform current points being drawn
+        if self.current_points:
+            new_current_points = []
+            for x, y in self.current_points:
+                new_x = y
+                new_y = orig_width - x
+                new_current_points.append((new_x, new_y))
+            self.current_points = new_current_points
+
     def show_annotation_counter(self):
         counts = self.get_annotation_counts()
         
